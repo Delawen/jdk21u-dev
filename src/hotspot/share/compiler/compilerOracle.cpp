@@ -623,6 +623,67 @@ void skip_comma(char* &line) {
   }
 }
 
+static bool parseMemLimit(const char* line, intx& value, int& bytes_read, char* errorbuf, const int buf_size) {
+  // Format:
+  // "<memory size>['~' <suboption>]"
+  // <memory size> can have units, e.g. M
+  // <suboption> one of "crash" "stop", if omitted, "stop" is implied.
+  //
+  // Examples:
+  // -XX:CompileCommand='memlimit,*.*,20m'
+  // -XX:CompileCommand='memlimit,*.*,20m~stop'
+  // -XX:CompileCommand='memlimit,Option::toString,1m~crash'
+  //
+  // The resulting intx carries the size and whether we are to stop or crash:
+  // - neg. value means crash
+  // - pos. value (default) means stop
+  size_t s = 0;
+  char* end;
+  if (!parse_integer<size_t>(line, &end, &s)) {
+    jio_snprintf(errorbuf, buf_size, "MemLimit: invalid value");
+  }
+  bytes_read = (int)(end - line);
+
+  intx v = (intx)s;
+  if ((*end) != '\0') {
+    if (strncasecmp(end, "~crash", 6) == 0) {
+      v = -v;
+      bytes_read += 6;
+    } else if (strncasecmp(end, "~stop", 5) == 0) {
+      // ok, this is the default
+      bytes_read += 5;
+    } else {
+      jio_snprintf(errorbuf, buf_size, "MemLimit: invalid option");
+      return true;
+    }
+  }
+  value = v;
+  return true;
+}
+
+static bool parseMemStat(const char* line, uintx& value, int& bytes_read, char* errorbuf, const int buf_size) {
+
+#define IF_ENUM_STRING(S, CMD)                \
+  if (strncasecmp(line, S, strlen(S)) == 0) { \
+    bytes_read += (int)strlen(S);             \
+    CMD                                       \
+    return true;                              \
+  }
+
+  IF_ENUM_STRING("collect", {
+    value = (uintx)MemStatAction::collect;
+  });
+  IF_ENUM_STRING("print", {
+    value = (uintx)MemStatAction::print;
+    print_final_memstat_report = true;
+  });
+#undef IF_ENUM_STRING
+
+  jio_snprintf(errorbuf, buf_size, "MemStat: invalid option");
+
+  return false;
+}
+
 static void scan_value(enum OptionType type, char* line, int& total_bytes_read,
         TypedMethodOptionMatcher* matcher, enum CompileCommand option, char* errorbuf, const int buf_size) {
   int bytes_read = 0;
@@ -642,7 +703,15 @@ static void scan_value(enum OptionType type, char* line, int& total_bytes_read,
     }
   } else if (type == OptionType::Uintx) {
     uintx value;
-    if (sscanf(line, "" UINTX_FORMAT "%n", &value, &bytes_read) == 1) {
+    bool success = false;
+    if (option == CompileCommand::MemStat) {
+      // Special parsing for MemStat
+      success = parseMemStat(line, value, bytes_read, errorbuf, buf_size);
+    } else {
+      // parse as raw number
+      success = sscanf(line, "" UINTX_FORMAT "%n", &value, &bytes_read) == 1;
+    }
+    if (success) {
       total_bytes_read += bytes_read;
       line += bytes_read;
       register_command(matcher, option, value);
